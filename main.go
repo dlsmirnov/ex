@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,20 +12,44 @@ import (
 )
 
 const (
-	statsURL        = "http://srv.msk01.gigacorp.local/_stats"
-	loadThreshold   = 30           // Load Average threshold
-	memoryThreshold = 80           // percent, integer threshold (80%)
-	diskThreshold   = 90           // percent, integer threshold (90%)
-	networkThreshold = 90          // percent, integer threshold (90%)
-	checkInterval   = 1 * time.Second // how often to poll (tests will stop the process)
-	maxErrors       = 3
+	defaultURL       = "http://srv.msk01.gigacorp.local/_stats"
+	loadThreshold    = 30          // если load > 30
+	memoryThresholdP = 80          // в процентах (80%)
+	diskThresholdP   = 90          // в процентах (90%)
+	networkThresholdP = 90         // в процентах (90%)
+	checkInterval     = 1 * time.Second // интервал опроса
+	maxErrors         = 3
 )
 
 func main() {
+	// URL можно переопределить через переменную окружения STATS_URL (тесты её используют)
+	statsURL := os.Getenv("STATS_URL")
+	if statsURL == "" {
+		statsURL = defaultURL
+	}
+
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
 	errorCount := 0
-	// ensure prints are flushed even if buffer - stdout is unbuffered typically
+
 	for {
-		resp, err := http.Get(statsURL)
+		// context с таймаутом на случай подвисания
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, statsURL, nil)
+		if err != nil {
+			cancel()
+			errorCount++
+			if errorCount >= maxErrors {
+				fmt.Println("Unable to fetch server statistic")
+			}
+			time.Sleep(checkInterval)
+			continue
+		}
+
+		resp, err := client.Do(req)
+		cancel()
 		if err != nil {
 			errorCount++
 			if errorCount >= maxErrors {
@@ -34,19 +59,17 @@ func main() {
 			continue
 		}
 
-		// read and validate
 		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
 			errorCount++
 			if errorCount >= maxErrors {
 				fmt.Println("Unable to fetch server statistic")
 			}
-			io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
 			time.Sleep(checkInterval)
 			continue
 		}
 
-		bodyBytes, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
 			errorCount++
@@ -57,9 +80,8 @@ func main() {
 			continue
 		}
 
-		// parse
-		line := strings.TrimSpace(string(bodyBytes))
-		parts := strings.Split(line, ",")
+		// Разбираем тело: 7 чисел, разделённых запятыми
+		parts := strings.Split(strings.TrimSpace(string(body)), ",")
 		if len(parts) != 7 {
 			errorCount++
 			if errorCount >= maxErrors {
@@ -69,20 +91,16 @@ func main() {
 			continue
 		}
 
-		// successful parse -> reset error count
-		errorCount = 0
+		// Парсим все как целые (int64)
+		load, err0 := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
+		memTotal, err1 := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+		memUsed, err2 := strconv.ParseInt(strings.TrimSpace(parts[2]), 10, 64)
+		diskTotal, err3 := strconv.ParseInt(strings.TrimSpace(parts[3]), 10, 64)
+		diskUsed, err4 := strconv.ParseInt(strings.TrimSpace(parts[4]), 10, 64)
+		netTotal, err5 := strconv.ParseInt(strings.TrimSpace(parts[5]), 10, 64)
+		netUsed, err6 := strconv.ParseInt(strings.TrimSpace(parts[6]), 10, 64)
 
-		// parse integers (use 64-bit)
-		load, err1 := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
-		memTotal, err2 := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
-		memUsed, err3 := strconv.ParseInt(strings.TrimSpace(parts[2]), 10, 64)
-		diskTotal, err4 := strconv.ParseInt(strings.TrimSpace(parts[3]), 10, 64)
-		diskUsed, err5 := strconv.ParseInt(strings.TrimSpace(parts[4]), 10, 64)
-		netTotal, err6 := strconv.ParseInt(strings.TrimSpace(parts[5]), 10, 64)
-		netUsed, err7 := strconv.ParseInt(strings.TrimSpace(parts[6]), 10, 64)
-
-		if err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil || err6 != nil || err7 != nil {
-			// invalid format
+		if err0 != nil || err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil || err6 != nil {
 			errorCount++
 			if errorCount >= maxErrors {
 				fmt.Println("Unable to fetch server statistic")
@@ -91,54 +109,45 @@ func main() {
 			continue
 		}
 
-		// 1) Load average
+		// успешный разбор — сбрасываем счётчик ошибок
+		errorCount = 0
+
+		// 1) Load Average
 		if load > loadThreshold {
-			// print integer value
+			// печатаем целое значение (без десятичных)
 			fmt.Printf("Load Average is too high: %d\n", load)
 		}
 
-		// 2) Memory usage percent (integer, floor)
-		// protect against division by zero
+		// 2) Memory usage in percent (целочисленно)
 		if memTotal > 0 {
-			memPercent := int((memUsed * 100) / memTotal) // integer division -> floor
-			if memPercent > memoryThreshold {
+			memPercent := (memUsed * 100) / memTotal // целочисленное (floor)
+			if memPercent > memoryThresholdP {
 				fmt.Printf("Memory usage too high: %d%%\n", memPercent)
 			}
 		}
 
-		// 3) Disk usage: check if used/diskTotal > 90%
+		// 3) Disk usage: свободное пространство в MB
 		if diskTotal > 0 {
-			// compute used percent via integers: used*100 / total
-			diskUsedPercent := int((diskUsed * 100) / diskTotal)
-			if diskUsedPercent > diskThreshold {
-				// free MB left, integer
+			diskUsedPercent := (diskUsed * 100) / diskTotal
+			if diskUsedPercent > diskThresholdP {
 				freeBytes := diskTotal - diskUsed
-				if freeBytes < 0 {
-					freeBytes = 0
-				}
-				freeMB := freeBytes / 1024 / 1024
+				freeMB := freeBytes / (1024 * 1024) // целые мегабайты
 				fmt.Printf("Free disk space is too low: %d Mb left\n", freeMB)
 			}
 		}
 
-		// 4) Network: if used/total > 90% -> print available in MB/s (integer) but label Mbit/s
+		// 4) Network: свободная пропускная способность в Mbit/s
 		if netTotal > 0 {
-			netUsedPercent := int((netUsed * 100) / netTotal)
-			if netUsedPercent > networkThreshold {
-				availableBytes := netTotal - netUsed
-				if availableBytes < 0 {
-					availableBytes = 0
-				}
-				availableMB := availableBytes / 1024 / 1024 // MB/s (integer)
-				// IMPORTANT: tests expect this integer but with the text "Mbit/s available"
-				fmt.Printf("Network bandwidth usage high: %d Mbit/s available\n", availableMB)
+			netUsedPercent := (netUsed * 100) / netTotal
+			if netUsedPercent > networkThresholdP {
+				availBytes := netTotal - netUsed
+				// переводим в Mbit/s: (bytes * 8) / (1024*1024)
+				availMbit := (availBytes * 8) / (1024 * 1024)
+				fmt.Printf("Network bandwidth usage high: %d Mbit/s available\n", availMbit)
 			}
 		}
 
-		// small sleep before next poll
+		// Ждём интервал
 		time.Sleep(checkInterval)
 	}
-
-	// unreachable, but keep os.Exit to satisfy some linters if needed
-	_ = os.Stdout
 }
