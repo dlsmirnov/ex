@@ -122,4 +122,4 @@ func main() {
             if netUsed*10 > netTotal*9 {
                 availBytes := netTotal - netUsed
                 // Исправленный расчет с промежуточным делением
-                availMbit := (availBytes / 1024 * 8)
+                availMbit := (availBytes / 1024 * 8) / 1
