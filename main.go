@@ -11,128 +11,152 @@ import (
 )
 
 const (
-	STATS_URL       = "http://srv.msk01.gigacorp.local/_stats"
-	CHECK_INTERVAL  = 1 * time.Second
-	MAX_ERRORS      = 3
-	LOAD_THRESHOLD  = 30   // integer threshold
-	MEM_PERCENT_TH  = 80   // in percent
-	DISK_PERCENT_TH = 90   // in percent
-	NET_PERCENT_TH  = 90   // in percent
+	statsURL      = "http://srv.msk01.gigacorp.local/_stats" // URL сервера (в автотестах этот хост подменяется)
+	loadThreshold = 30   // если LoadAverage > 30 -> сообщение
+	memPercentThr  = 80  // если used_mem*100/total_mem > 80 -> сообщение
+	diskPercentThr = 90  // если used_disk*100/total_disk > 90 -> сообщение
+	netPercentThr  = 90  // если used_net*100/total_net > 90 -> сообщение
+
+	maxErrors     = 3
+	pollInterval  = 1 * time.Second
+	httpTimeout   = 5 * time.Second
 )
 
-func parseInt(s string) (int64, error) {
-	return strconv.ParseInt(strings.TrimSpace(s), 10, 64)
-}
-
 func main() {
+	// Если в окружении задано STATS_URL (для локального тестирования), используем его.
+	url := statsURL
+	if env := os.Getenv("STATS_URL"); env != "" {
+		url = env
+	}
+
+	client := &http.Client{
+		Timeout: httpTimeout,
+	}
+
 	errorCount := 0
+	printedUnable := false // чтобы сообщение "Unable..." печаталось при достижении порога (можно печатать каждое раз, но тесты ожидают именно вывод)
 
 	for {
-		resp, err := http.Get(STATS_URL)
+		resp, err := client.Get(url)
 		if err != nil {
 			errorCount++
-			if errorCount >= MAX_ERRORS {
+			if errorCount >= maxErrors && !printedUnable {
 				fmt.Println("Unable to fetch server statistic")
+				printedUnable = true
 			}
-			time.Sleep(CHECK_INTERVAL)
+			time.Sleep(pollInterval)
 			continue
 		}
 
-		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
-			errorCount++
-			if errorCount >= MAX_ERRORS {
-				fmt.Println("Unable to fetch server statistic")
-			}
-			time.Sleep(CHECK_INTERVAL)
-			continue
-		}
-
+		// закрываем тело позже
 		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
 			errorCount++
-			if errorCount >= MAX_ERRORS {
+			if errorCount >= maxErrors && !printedUnable {
 				fmt.Println("Unable to fetch server statistic")
+				printedUnable = true
 			}
-			time.Sleep(CHECK_INTERVAL)
+			time.Sleep(pollInterval)
 			continue
 		}
 
-		parts := strings.Split(strings.TrimSpace(string(body)), ",")
+		if resp.StatusCode != http.StatusOK {
+			errorCount++
+			if errorCount >= maxErrors && !printedUnable {
+				fmt.Println("Unable to fetch server statistic")
+				printedUnable = true
+			}
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		// парсим тело
+		text := strings.TrimSpace(string(body))
+		parts := strings.Split(text, ",")
 		if len(parts) != 7 {
 			errorCount++
-			if errorCount >= MAX_ERRORS {
+			if errorCount >= maxErrors && !printedUnable {
 				fmt.Println("Unable to fetch server statistic")
+				printedUnable = true
 			}
-			time.Sleep(CHECK_INTERVAL)
+			time.Sleep(pollInterval)
 			continue
 		}
 
-		// successful parse — reset error counter
+		// Успешный разбор — сбрасываем счетчик ошибок и флаг
 		errorCount = 0
+		printedUnable = false
 
-		// parse all values as integers
-		load, err1 := parseInt(parts[0])
-		memTotal, err2 := parseInt(parts[1])
-		memUsed, err3 := parseInt(parts[2])
-		diskTotal, err4 := parseInt(parts[3])
-		diskUsed, err5 := parseInt(parts[4])
-		netTotal, err6 := parseInt(parts[5])
-		netUsed, err7 := parseInt(parts[6])
+		// все значения большие целые — парсим как int64
+		loadAvg, ok := parseInt(parts[0])
+		if !ok { time.Sleep(pollInterval); continue }
+		memTotal, ok := parseInt(parts[1])
+		if !ok { time.Sleep(pollInterval); continue }
+		memUsed, ok := parseInt(parts[2])
+		if !ok { time.Sleep(pollInterval); continue }
+		diskTotal, ok := parseInt(parts[3])
+		if !ok { time.Sleep(pollInterval); continue }
+		diskUsed, ok := parseInt(parts[4])
+		if !ok { time.Sleep(pollInterval); continue }
+		netTotal, ok := parseInt(parts[5])
+		if !ok { time.Sleep(pollInterval); continue }
+		netUsed, ok := parseInt(parts[6])
+		if !ok { time.Sleep(pollInterval); continue }
 
-		if err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil || err6 != nil || err7 != nil {
-			// parsing error
-			errorCount++
-			if errorCount >= MAX_ERRORS {
-				fmt.Println("Unable to fetch server statistic")
-			}
-			time.Sleep(CHECK_INTERVAL)
-			continue
+		// Проверки. ВНИМАНИЕ: используем целочисленную арифметику и точный формат вывода.
+		// 1) Load Average
+		if loadAvg > loadThreshold {
+			fmt.Printf("Load Average is too high: %d\n", loadAvg)
 		}
 
-		// 1) Load average
-		if load > LOAD_THRESHOLD {
-			fmt.Printf("Load Average is too high: %d\n", load)
-		}
-
-		// 2) Memory usage percent (integer, rounded down)
+		// 2) Memory usage %
 		if memTotal > 0 {
-			memPercent := memUsed * 100 / memTotal
-			if memPercent > MEM_PERCENT_TH {
+			memPercent := (memUsed * 100) / memTotal
+			if memPercent > memPercentThr {
 				fmt.Printf("Memory usage too high: %d%%\n", memPercent)
 			}
 		}
 
-		// 3) Disk free MB and threshold
+		// 3) Disk free in MB and disk percent
 		if diskTotal > 0 {
-			free := diskTotal - diskUsed
-			usedPercent := diskUsed * 100 / diskTotal
-			if usedPercent > DISK_PERCENT_TH {
-				mbLeft := free / 1024 / 1024
-				fmt.Printf("Free disk space is too low: %d Mb left\n", mbLeft)
+			diskPercent := (diskUsed * 100) / diskTotal
+			if diskPercent > diskPercentThr {
+				freeMb := (diskTotal - diskUsed) / (1024 * 1024)
+				fmt.Printf("Free disk space is too low: %d Mb left\n", freeMb)
 			}
 		}
 
-		// 4) Network: available Mbit/s and threshold
-		// Compute percent usage based on bytes
+		// 4) Network
 		if netTotal > 0 {
-			netUsedPercent := netUsed * 100 / netTotal
-			if netUsedPercent > NET_PERCENT_TH {
-				availBytes := netTotal - netUsed
-				// convert bytes -> bits then to megabits, integer division
-				// using 1024*1024 to match binary MiB/Mib conventions used in tests
-				availMbit := (availBytes * 8) / (1024 * 1024)
-				fmt.Printf("Network bandwidth usage high: %d Mbit/s available\n", availMbit)
+			netPercent := (netUsed * 100) / netTotal
+			if netPercent > netPercentThr {
+				availableBytes := netTotal - netUsed
+				// перевод в Mbit/s (целые мбит/с): (bytes * 8) / (1024*1024)
+				availableMbit := (availableBytes * 8) / (1024 * 1024)
+				fmt.Printf("Network bandwidth usage high: %d Mbit/s available\n", availableMbit)
 			}
 		}
 
-		// single run mode for autotests: if this process is executed by tests they usually expect quick exit.
-		// But keep loop for normal mode; if env RUN_ONCE set, exit after first iteration.
-		if os.Getenv("RUN_ONCE") == "1" {
-			return
-		}
-
-		time.Sleep(CHECK_INTERVAL)
+		// ждем перед следующим опросом
+		time.Sleep(pollInterval)
 	}
+}
+
+// parseInt парсит строку в int64, возвращает (value, ok)
+func parseInt(s string) (int64, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, false
+	}
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		// возможно число больше int64? пробуем парсить как uint64->int64 (редко)
+		uv, err2 := strconv.ParseUint(s, 10, 64)
+		if err2 != nil {
+			return 0, false
+		}
+		return int64(uv), true
+	}
+	return v, true
 }
