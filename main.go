@@ -11,15 +11,15 @@ import (
 )
 
 const (
-	statsURL      = "http://srv.msk01.gigacorp.local/_stats" // URL сервера (в автотестах этот хост подменяется)
-	loadThreshold = 30   // если LoadAverage > 30 -> сообщение
-	memPercentThr  = 80  // если used_mem*100/total_mem > 80 -> сообщение
-	diskPercentThr = 90  // если used_disk*100/total_disk > 90 -> сообщение
-	netPercentThr  = 90  // если used_net*100/total_net > 90 -> сообщение
+	statsURL       = "http://srv.msk01.gigacorp.local/_stats" // URL сервера (в автотестах этот хост подменяется)
+	loadThreshold  = 30   // если LoadAverage > 30 -> сообщение
+	memPercentThr  = 80   // если used_mem*100/total_mem > 80 -> сообщение
+	diskPercentThr = 90   // если used_disk*100/total_disk > 90 -> сообщение
+	netPercentThr  = 90   // если used_net*100/total_net > 90 -> сообщение
 
-	maxErrors     = 3
-	pollInterval  = 1 * time.Second
-	httpTimeout   = 5 * time.Second
+	maxErrors    = 3
+	pollInterval = 1 * time.Second
+	httpTimeout  = 5 * time.Second
 )
 
 func main() {
@@ -34,7 +34,7 @@ func main() {
 	}
 
 	errorCount := 0
-	printedUnable := false // чтобы сообщение "Unable..." печаталось при достижении порога (можно печатать каждое раз, но тесты ожидают именно вывод)
+	printedUnable := false
 
 	for {
 		resp, err := client.Get(url)
@@ -48,7 +48,6 @@ func main() {
 			continue
 		}
 
-		// закрываем тело позже
 		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
@@ -71,7 +70,6 @@ func main() {
 			continue
 		}
 
-		// парсим тело
 		text := strings.TrimSpace(string(body))
 		parts := strings.Split(text, ",")
 		if len(parts) != 7 {
@@ -104,7 +102,6 @@ func main() {
 		netUsed, ok := parseInt(parts[6])
 		if !ok { time.Sleep(pollInterval); continue }
 
-		// Проверки. ВНИМАНИЕ: используем целочисленную арифметику и точный формат вывода.
 		// 1) Load Average
 		if loadAvg > loadThreshold {
 			fmt.Printf("Load Average is too high: %d\n", loadAvg)
@@ -118,7 +115,7 @@ func main() {
 			}
 		}
 
-		// 3) Disk free in MB and disk percent
+		// 3) Disk free in MB
 		if diskTotal > 0 {
 			diskPercent := (diskUsed * 100) / diskTotal
 			if diskPercent > diskPercentThr {
@@ -132,8 +129,8 @@ func main() {
 			netPercent := (netUsed * 100) / netTotal
 			if netPercent > netPercentThr {
 				availableBytes := netTotal - netUsed
-				// перевод в Mbit/s (целые мбит/с): (bytes * 8) / (1024*1024)
-				availableMbit := (availableBytes * 8) / (1024 * 1024)
+				// перевод в Mbit/s (делим на 1_000_000)
+				availableMbit := availableBytes / (1000 * 1000)
 				fmt.Printf("Network bandwidth usage high: %d Mbit/s available\n", availableMbit)
 			}
 		}
@@ -151,7 +148,7 @@ func parseInt(s string) (int64, bool) {
 	}
 	v, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
-		// возможно число больше int64? пробуем парсить как uint64->int64 (редко)
+		// возможно число больше int64? пробуем парсить как uint64
 		uv, err2 := strconv.ParseUint(s, 10, 64)
 		if err2 != nil {
 			return 0, false
@@ -160,3 +157,4 @@ func parseInt(s string) (int64, bool) {
 	}
 	return v, true
 }
+
