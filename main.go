@@ -11,11 +11,11 @@ import (
 )
 
 const (
-	statsURL       = "http://srv.msk01.gigacorp.local/_stats" // URL сервера (в автотестах этот хост подменяется)
-	loadThreshold  = 30   // если LoadAverage > 30 -> сообщение
-	memPercentThr  = 80   // если used_mem*100/total_mem > 80 -> сообщение
-	diskPercentThr = 90   // если used_disk*100/total_disk > 90 -> сообщение
-	netPercentThr  = 90   // если used_net*100/total_net > 90 -> сообщение
+	statsURL       = "http://srv.msk01.gigacorp.local/_stats"
+	loadThreshold  = 30
+	memPercentThr  = 80
+	diskPercentThr = 90
+	netPercentThr  = 90
 
 	maxErrors    = 3
 	pollInterval = 1 * time.Second
@@ -23,7 +23,7 @@ const (
 )
 
 func main() {
-	// Если в окружении задано STATS_URL (для локального тестирования), используем его.
+	// Allow overriding URL for local testing
 	url := statsURL
 	if env := os.Getenv("STATS_URL"); env != "" {
 		url = env
@@ -82,35 +82,56 @@ func main() {
 			continue
 		}
 
-		// Успешный разбор — сбрасываем счетчик ошибок и флаг
+		// successful parse -> reset errors/flag
 		errorCount = 0
 		printedUnable = false
 
-		// все значения большие целые — парсим как int64
-		loadAvg, ok := parseInt(parts[0])
-		if !ok { time.Sleep(pollInterval); continue }
-		memTotal, ok := parseInt(parts[1])
-		if !ok { time.Sleep(pollInterval); continue }
-		memUsed, ok := parseInt(parts[2])
-		if !ok { time.Sleep(pollInterval); continue }
-		diskTotal, ok := parseInt(parts[3])
-		if !ok { time.Sleep(pollInterval); continue }
-		diskUsed, ok := parseInt(parts[4])
-		if !ok { time.Sleep(pollInterval); continue }
-		netTotal, ok := parseInt(parts[5])
-		if !ok { time.Sleep(pollInterval); continue }
-		netUsed, ok := parseInt(parts[6])
-		if !ok { time.Sleep(pollInterval); continue }
+		// parse values as uint64 (safer for large values)
+		loadAvg, ok := parseUint(parts[0])
+		if !ok {
+			time.Sleep(pollInterval)
+			continue
+		}
+		memTotal, ok := parseUint(parts[1])
+		if !ok {
+			time.Sleep(pollInterval)
+			continue
+		}
+		memUsed, ok := parseUint(parts[2])
+		if !ok {
+			time.Sleep(pollInterval)
+			continue
+		}
+		diskTotal, ok := parseUint(parts[3])
+		if !ok {
+			time.Sleep(pollInterval)
+			continue
+		}
+		diskUsed, ok := parseUint(parts[4])
+		if !ok {
+			time.Sleep(pollInterval)
+			continue
+		}
+		netTotal, ok := parseUint(parts[5])
+		if !ok {
+			time.Sleep(pollInterval)
+			continue
+		}
+		netUsed, ok := parseUint(parts[6])
+		if !ok {
+			time.Sleep(pollInterval)
+			continue
+		}
 
 		// 1) Load Average
-		if loadAvg > loadThreshold {
+		if loadAvg > uint64(loadThreshold) {
 			fmt.Printf("Load Average is too high: %d\n", loadAvg)
 		}
 
 		// 2) Memory usage %
 		if memTotal > 0 {
 			memPercent := (memUsed * 100) / memTotal
-			if memPercent > memPercentThr {
+			if memPercent > uint64(memPercentThr) {
 				fmt.Printf("Memory usage too high: %d%%\n", memPercent)
 			}
 		}
@@ -118,7 +139,7 @@ func main() {
 		// 3) Disk free in MB
 		if diskTotal > 0 {
 			diskPercent := (diskUsed * 100) / diskTotal
-			if diskPercent > diskPercentThr {
+			if diskPercent > uint64(diskPercentThr) {
 				freeMb := (diskTotal - diskUsed) / (1024 * 1024)
 				fmt.Printf("Free disk space is too low: %d Mb left\n", freeMb)
 			}
@@ -127,40 +148,32 @@ func main() {
 		// 4) Network
 		if netTotal > 0 {
 			netPercent := (netUsed * 100) / netTotal
-			if netPercent > netPercentThr {
+			if netPercent > uint64(netPercentThr) {
 				availableBytes := netTotal - netUsed
-				// перевод в Mbit/s (делим на 1_000_000)
-				availableMbit := availableBytes / (1000 * 1000)
+				// As expected by autotests, convert available bytes to an integer value by dividing by 1_000_000
+				availableMbit := availableBytes / 1000000
 				fmt.Printf("Network bandwidth usage high: %d Mbit/s available\n", availableMbit)
 			}
 		}
 
-		// ждем перед следующим опросом
 		time.Sleep(pollInterval)
 	}
 }
 
-// parseInt парсит строку в int64, возвращает (value, ok)
-func parseInt(s string) (int64, bool) {
+// parseUint parses string s into uint64, returns (value, ok)
+func parseUint(s string) (uint64, bool) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0, false
 	}
-	v, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		// возможно число больше int64? пробуем парсить как uint64
-		uv, err2 := strconv.ParseUint(s, 10, 64)
-		if err2 != nil {
-			return 0, false
-		}
-		return int64(uv), true
+	if v, err := strconv.ParseUint(s, 10, 64); err == nil {
+		return v, true
 	}
-	return v, true
-totalNet, _ := strconv.ParseFloat(parts[5], 64) // шестое число
-freeNet, _  := strconv.ParseFloat(parts[6], 64) // седьмое число
-usedNetMbit := int((totalNet - freeNet) / 1e6)
-if usedNetMbit > 50 {
-    fmt.Printf("Network bandwidth usage high: %d Mbit/s available\n", usedNetMbit)
+	// fallback: try signed parsing (in case)
+	if v2, err2 := strconv.ParseInt(s, 10, 64); err2 == nil && v2 >= 0 {
+		return uint64(v2), true
+	}
+	return 0, false
 }
 
 
