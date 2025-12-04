@@ -156,5 +156,11 @@ func parseInt(s string) (int64, bool) {
 		return int64(uv), true
 	}
 	return v, true
+totalNet, _ := strconv.ParseFloat(parts[5], 64) // шестое число
+freeNet, _  := strconv.ParseFloat(parts[6], 64) // седьмое число
+usedNetMbit := int((totalNet - freeNet) / 1e6)
+if usedNetMbit > 50 {
+    fmt.Printf("Network bandwidth usage high: %d Mbit/s available\n", usedNetMbit)
 }
+
 
